@@ -2,13 +2,14 @@ import express from 'express';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { fileURLToPath } from 'url';
 import { GoogleGenAI } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
 import { initialAppData } from './src/data/initialData.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+// NOTE: __dirname and __filename are available natively here because esbuild
+// bundles this file to CommonJS (--format=cjs). Do NOT reintroduce
+// fileURLToPath(import.meta.url) — import.meta.url does not exist in CJS
+// and will throw "The path argument must be of type string... Received undefined".
 
 const app = express();
 const PORT = 3000;
