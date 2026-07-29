@@ -1,0 +1,6 @@
+{
+  "name": "Hermano's Control",
+  "description": "Sistema ERP de gerenciamento oficial e completo da Hermano's Outfit",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
