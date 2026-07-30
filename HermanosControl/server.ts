@@ -105,6 +105,11 @@ async function loadData() {
 // Generic upsert-all-rows helper: deletes rows not present in `items` and
 // upserts the rest, keyed by `id`. Keeps things simple/robust for a low-write-
 // volume internal ERP (full-array save on every change, same as before).
+// Columns that are jsonb (object/array) rather than a native PG array/scalar —
+// must be JSON.stringify'd before being passed as a query parameter, or `pg`
+// will send a garbage string representation and Postgres rejects it.
+const JSONB_FIELDS = new Set(['items', 'history', 'payload']);
+
 async function replaceTable(table: string, items: any[], columns: string[]) {
   const ids = items.map((it) => it.id).filter(Boolean);
   if (ids.length > 0) {
@@ -117,7 +122,9 @@ async function replaceTable(table: string, items: any[], columns: string[]) {
     const dbCols = cols.map(snake);
     const values = cols.map((c) => {
       const v = item[c];
-      return v === undefined ? null : v;
+      if (v === undefined) return null;
+      if (JSONB_FIELDS.has(c) && v !== null) return JSON.stringify(v);
+      return v;
     });
     const placeholders = dbCols.map((_, i) => `$${i + 1}`);
     const quotedCols = dbCols.map((c) => `"${c}"`);
