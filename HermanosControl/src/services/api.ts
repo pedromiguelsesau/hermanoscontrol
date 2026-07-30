@@ -1,93 +1,43 @@
 import { AppData, AuditLogItem, User, TrashItem, MediaItem, MediaCategory } from '../types';
-import { initialAppData } from '../data/initialData';
-
-const LOCAL_STORAGE_KEY = 'hermanos_control_data_v1';
-const AUTH_KEY = 'hermanos_auth_user';
+import { supabase } from '../lib/supabaseClient';
 
 export const apiService = {
-  // Auth
-  async login(username: string, password: string): Promise<{ success: boolean; user?: User; message?: string }> {
-    try {
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password })
-      });
-      const data = await res.json();
-      if (res.ok && data.success) {
-        localStorage.setItem(AUTH_KEY, JSON.stringify(data.user));
-        return { success: true, user: data.user };
-      }
-      return { success: false, message: data.message || 'Credenciais inválidas' };
-    } catch (e) {
-      // Offline fallback check via Web Crypto API
-      try {
-        const encoder = new TextEncoder();
-        const uBuf = await crypto.subtle.digest('SHA-256', encoder.encode(username.trim().toLowerCase()));
-        const pBuf = await crypto.subtle.digest('SHA-256', encoder.encode(password));
-
-        const uHex = Array.from(new Uint8Array(uBuf)).map((b) => b.toString(16).padStart(2, '0')).join('');
-        const pHex = Array.from(new Uint8Array(pBuf)).map((b) => b.toString(16).padStart(2, '0')).join('');
-
-        const targetUser = '91950d4ffbce9d7b4db9fbbf3ce29f425b7ca309bd4bc613beaa020164c8d57d';
-        const targetEmail = '40056aa133226be0f0fb5bc4e5cdbc1fe251b54ec65bc83dc9847bd6bf474cc0';
-        const targetPass = '0291df13ebcd6347c6179331d25ffb6c23631557008fb56a84f3df9371ffad21';
-
-        if ((uHex === targetUser || uHex === targetEmail) && pHex === targetPass) {
-          const user: User = {
-            username: 'hermanosconceito',
-            name: 'Hermano’s Outfit Admin',
-            role: 'Administrador Principal',
-            avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80'
-          };
-          localStorage.setItem(AUTH_KEY, JSON.stringify(user));
-          return { success: true, user };
-        }
-      } catch (err) {
-        console.error('Offline hash check error:', err);
-      }
-      return { success: false, message: 'Usuário ou senha incorretos' };
+  // Auth — real Supabase Auth. No local fallback, no hardcoded credentials.
+  async login(email: string, password: string): Promise<{ success: boolean; user?: User; message?: string }> {
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error || !data.user) {
+      return { success: false, message: error?.message || 'Credenciais inválidas' };
     }
+    const user: User = {
+      username: data.user.email || '',
+      name: (data.user.user_metadata?.name as string) || data.user.email || '',
+      role: (data.user.user_metadata?.role as string) || 'Usuário',
+      avatar: (data.user.user_metadata?.avatar as string) || ''
+    };
+    return { success: true, user };
   },
 
-  getCurrentUser(): User | null {
-    try {
-      const stored = localStorage.getItem(AUTH_KEY);
-      return stored ? JSON.parse(stored) : null;
-    } catch {
-      return null;
-    }
+  async getCurrentUser(): Promise<User | null> {
+    const { data } = await supabase.auth.getSession();
+    const su = data.session?.user;
+    if (!su) return null;
+    return {
+      username: su.email || '',
+      name: (su.user_metadata?.name as string) || su.email || '',
+      role: (su.user_metadata?.role as string) || 'Usuário',
+      avatar: (su.user_metadata?.avatar as string) || ''
+    };
   },
 
-  logout(): void {
-    localStorage.removeItem(AUTH_KEY);
+  async logout(): Promise<void> {
+    await supabase.auth.signOut();
   },
 
-  // Load Data
+  // Load Data — always from the server (which reads Supabase tables directly, RLS-protected).
   async loadAppData(): Promise<AppData> {
-    try {
-      const res = await fetch('/api/data');
-      if (res.ok) {
-        const data = await res.json();
-        // Update local backup
-        localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(data));
-        return data;
-      }
-    } catch (e) {
-      console.warn('Network offline or server unreachable, loading local cached data:', e);
-    }
-
-    // Local fallback
-    try {
-      const cached = localStorage.getItem(LOCAL_STORAGE_KEY);
-      if (cached) {
-        return JSON.parse(cached);
-      }
-    } catch (e) {
-      console.error('Failed reading local storage:', e);
-    }
-
-    return initialAppData;
+    const res = await fetch('/api/data');
+    if (!res.ok) throw new Error('Falha ao carregar dados do servidor');
+    return res.json();
   },
 
   async getInitialData(): Promise<AppData> {
@@ -96,14 +46,6 @@ export const apiService = {
 
   // Save Data
   async saveAppData(data: AppData): Promise<boolean> {
-    // Save to LocalStorage immediately
-    try {
-      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(data));
-    } catch (e) {
-      console.error('Error saving to LocalStorage:', e);
-    }
-
-    // Sync to Server
     try {
       const res = await fetch('/api/data', {
         method: 'POST',
@@ -112,7 +54,7 @@ export const apiService = {
       });
       return res.ok;
     } catch (e) {
-      console.warn('Server sync pending (offline):', e);
+      console.error('Error saving data:', e);
       return false;
     }
   },

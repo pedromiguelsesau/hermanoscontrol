@@ -1,7 +1,6 @@
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
-import crypto from 'crypto';
 import { Pool } from 'pg';
 import { GoogleGenAI } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
@@ -39,48 +38,132 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-let dbReady: Promise<void> | null = null;
+// Maps AppData <-> the normalized Supabase tables created by supabase_schema.sql.
+// This server connection uses the `postgres` role (table owner), which bypasses
+// RLS by default — RLS on these tables protects any future direct-from-browser
+// access via the anon/publishable key, while this trusted server path still works.
 
-async function ensureTable() {
-  if (!dbReady) {
-    dbReady = pool.query(`
-      CREATE TABLE IF NOT EXISTS erp_data (
-        id INT PRIMARY KEY,
-        data JSONB NOT NULL,
-        updated_at TIMESTAMPTZ DEFAULT now()
-      );
-    `).then(() => undefined);
-  }
-  return dbReady;
-}
+const camelRow = (row: any) => {
+  const out: any = {};
+  for (const k in row) out[k.replace(/_([a-z])/g, (_, c) => c.toUpperCase())] = row[k];
+  return out;
+};
+const snake = (k: string) => k.replace(/[A-Z]/g, (c) => '_' + c.toLowerCase());
 
 async function loadData() {
   try {
-    await ensureTable();
-    const result = await pool.query('SELECT data FROM erp_data WHERE id = 1');
-    if (result.rows.length > 0) {
-      return result.rows[0].data;
-    }
-    // No row yet — seed with initial data
-    await pool.query(
-      'INSERT INTO erp_data (id, data) VALUES (1, $1) ON CONFLICT (id) DO NOTHING',
-      [JSON.stringify(initialAppData)]
-    );
-    return initialAppData;
+    const [
+      company, financial, site,
+      products, stockMovements, customers, purchases, sales,
+      expenses, cashFlow, marketing, goals, calendarEvents, tasks,
+      auditLogs, trash, media
+    ] = await Promise.all([
+      pool.query('SELECT * FROM company_config WHERE id = 1'),
+      pool.query('SELECT * FROM financial_state WHERE id = 1'),
+      pool.query('SELECT data FROM site_config WHERE id = 1'),
+      pool.query('SELECT * FROM products ORDER BY created_at'),
+      pool.query('SELECT * FROM stock_movements ORDER BY date'),
+      pool.query('SELECT * FROM customers ORDER BY created_at'),
+      pool.query('SELECT * FROM purchases ORDER BY created_at'),
+      pool.query('SELECT * FROM sales ORDER BY created_at'),
+      pool.query('SELECT * FROM expenses ORDER BY created_at'),
+      pool.query('SELECT * FROM cash_flow ORDER BY date'),
+      pool.query('SELECT * FROM marketing_campaigns'),
+      pool.query('SELECT * FROM goals'),
+      pool.query('SELECT * FROM calendar_events'),
+      pool.query('SELECT * FROM tasks ORDER BY created_at'),
+      pool.query('SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT 2000'),
+      pool.query('SELECT * FROM trash ORDER BY deleted_at DESC'),
+      pool.query('SELECT * FROM media_library ORDER BY uploaded_at DESC')
+    ]);
+
+    return {
+      companyConfig: company.rows[0] ? camelRow(company.rows[0]) : initialAppData.companyConfig,
+      financial: financial.rows[0] ? camelRow(financial.rows[0]) : initialAppData.financial,
+      siteConfig: site.rows[0]?.data || initialAppData.siteConfig,
+      products: products.rows.map(camelRow),
+      stockMovements: stockMovements.rows.map(camelRow),
+      customers: customers.rows.map(camelRow),
+      purchases: purchases.rows.map((r: any) => ({ ...camelRow(r), items: r.items })),
+      sales: sales.rows.map((r: any) => ({ ...camelRow(r), items: r.items })),
+      expenses: expenses.rows.map(camelRow),
+      cashFlow: cashFlow.rows.map(camelRow),
+      marketingCampaigns: marketing.rows.map(camelRow),
+      goals: goals.rows.map(camelRow),
+      calendarEvents: calendarEvents.rows.map(camelRow),
+      tasks: tasks.rows.map(camelRow),
+      auditLogs: auditLogs.rows.map(camelRow),
+      trash: trash.rows.map(camelRow),
+      mediaLibrary: media.rows.map(camelRow)
+    };
   } catch (err) {
     console.error('Error reading data from Supabase:', err);
     return initialAppData;
   }
 }
 
+// Generic upsert-all-rows helper: deletes rows not present in `items` and
+// upserts the rest, keyed by `id`. Keeps things simple/robust for a low-write-
+// volume internal ERP (full-array save on every change, same as before).
+async function replaceTable(table: string, items: any[], columns: string[]) {
+  const ids = items.map((it) => it.id).filter(Boolean);
+  if (ids.length > 0) {
+    await pool.query(`DELETE FROM ${table} WHERE id != ALL($1::uuid[])`, [ids]);
+  } else {
+    await pool.query(`DELETE FROM ${table}`);
+  }
+  for (const item of items) {
+    const cols = columns.filter((c) => c in item || c === 'id');
+    const dbCols = cols.map(snake);
+    const values = cols.map((c) => {
+      const v = item[c];
+      return v === undefined ? null : v;
+    });
+    const placeholders = dbCols.map((_, i) => `$${i + 1}`);
+    const updates = dbCols.filter((c) => c !== 'id').map((c) => `${c} = EXCLUDED.${c}`);
+    await pool.query(
+      `INSERT INTO ${table} (${dbCols.join(',')}) VALUES (${placeholders.join(',')})
+       ON CONFLICT (id) DO UPDATE SET ${updates.join(',')}`,
+      values
+    );
+  }
+}
+
 async function saveData(data: any) {
   try {
-    await ensureTable();
     await pool.query(
-      `INSERT INTO erp_data (id, data, updated_at) VALUES (1, $1, now())
-       ON CONFLICT (id) DO UPDATE SET data = $1, updated_at = now()`,
-      [JSON.stringify(data)]
+      `INSERT INTO company_config (id, name, cnpj, phone, email, instagram, address, currency)
+       VALUES (1, $1,$2,$3,$4,$5,$6,$7)
+       ON CONFLICT (id) DO UPDATE SET name=$1, cnpj=$2, phone=$3, email=$4, instagram=$5, address=$6, currency=$7`,
+      ['name', 'cnpj', 'phone', 'email', 'instagram', 'address', 'currency'].map((k) => data.companyConfig?.[k] ?? null)
     );
+    const f = data.financial || {};
+    await pool.query(
+      `INSERT INTO financial_state (id, accounts_payable, accounts_receivable, installments, profit, withdrawals, assets_value, available_balance)
+       VALUES (1,$1,$2,$3,$4,$5,$6,$7)
+       ON CONFLICT (id) DO UPDATE SET accounts_payable=$1, accounts_receivable=$2, installments=$3, profit=$4, withdrawals=$5, assets_value=$6, available_balance=$7`,
+      [f.accountsPayable, f.accountsReceivable, f.installments, f.profit, f.withdrawals, f.assetsValue, f.availableBalance]
+    );
+    await pool.query(
+      `INSERT INTO site_config (id, data) VALUES (1, $1) ON CONFLICT (id) DO UPDATE SET data = $1`,
+      [JSON.stringify(data.siteConfig || {})]
+    );
+
+    await replaceTable('products', data.products || [], ['id', 'code', 'name', 'category', 'brand', 'color', 'size', 'description', 'photos', 'costPrice', 'sellPrice', 'margin', 'stock', 'initialStock', 'minStockAlert', 'history', 'createdAt', 'updatedAt']);
+    await replaceTable('stock_movements', data.stockMovements || [], ['id', 'productId', 'productCode', 'productName', 'color', 'size', 'type', 'quantity', 'date', 'reason', 'user']);
+    await replaceTable('customers', data.customers || [], ['id', 'name', 'phone', 'email', 'notes', 'totalSpent', 'purchaseCount', 'createdAt', 'lastPurchaseDate']);
+    await replaceTable('purchases', data.purchases || [], ['id', 'supplier', 'date', 'paymentMethod', 'notes', 'freight', 'totalAmount', 'items', 'receiptUrl', 'createdAt']);
+    await replaceTable('sales', data.sales || [], ['id', 'customerId', 'customerName', 'date', 'items', 'discount', 'freight', 'totalAmount', 'profitAmount', 'paymentMethod', 'salesperson', 'notes', 'createdAt']);
+    await replaceTable('expenses', data.expenses || [], ['id', 'category', 'description', 'amount', 'date', 'paymentMethod', 'receiptUrl', 'notes', 'createdAt']);
+    await replaceTable('cash_flow', data.cashFlow || [], ['id', 'date', 'type', 'category', 'description', 'amount', 'balanceAfter', 'paymentMethod', 'referenceId']);
+    await replaceTable('marketing_campaigns', data.marketingCampaigns || [], ['id', 'title', 'budget', 'spent', 'startDate', 'endDate', 'channel', 'discountCode', 'discountPercentage', 'salesCount', 'revenueGenerated', 'roas', 'status']);
+    await replaceTable('goals', data.goals || [], ['id', 'monthYear', 'targetRevenue', 'targetProfit', 'targetSalesCount', 'targetItemsCount']);
+    await replaceTable('calendar_events', data.calendarEvents || [], ['id', 'title', 'date', 'time', 'type', 'category', 'notes', 'description', 'completed']);
+    await replaceTable('tasks', data.tasks || [], ['id', 'title', 'assignee', 'priority', 'completed', 'status', 'dueDate', 'notes', 'createdAt']);
+    await replaceTable('audit_logs', data.auditLogs || [], ['id', 'timestamp', 'dateFormatted', 'user', 'module', 'entity', 'entityId', 'action', 'details', 'oldValue', 'newValue']);
+    await replaceTable('trash', data.trash || [], ['id', 'originalId', 'type', 'originalName', 'payload', 'deletedAt', 'expiresAt', 'description']);
+    await replaceTable('media_library', data.mediaLibrary || [], ['id', 'name', 'url', 'category', 'size', 'sizeFormatted', 'mimeType', 'uploadedAt', 'uploadedBy', 'width', 'height']);
+
     return true;
   } catch (err) {
     console.error('Error saving data to Supabase:', err);
@@ -112,36 +195,7 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', time: new Date().toISOString() });
 });
 
-// Auth
-app.post('/api/auth/login', (req, res) => {
-  const { username, password } = req.body;
-  if (!username || !password) {
-    return res.status(401).json({ success: false, message: 'Usuário ou senha incorretos' });
-  }
-
-  const uInput = String(username).trim().toLowerCase();
-  const pInput = String(password);
-
-  const uHash = crypto.createHash('sha256').update(uInput).digest('hex');
-  const pHash = crypto.createHash('sha256').update(pInput).digest('hex');
-
-  const TARGET_USER_HASH = crypto.createHash('sha256').update('hermanosconceito').digest('hex');
-  const TARGET_EMAIL_HASH = crypto.createHash('sha256').update('hermanosconceito@hermanos.com').digest('hex');
-  const TARGET_PASS_HASH = crypto.createHash('sha256').update('hermanosbabdol').digest('hex');
-
-  if ((uHash === TARGET_USER_HASH || uHash === TARGET_EMAIL_HASH) && pHash === TARGET_PASS_HASH) {
-    return res.json({
-      success: true,
-      user: {
-        username: 'hermanosconceito',
-        name: 'Hermano’s Outfit Admin',
-        role: 'Administrador Principal',
-        avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80'
-      }
-    });
-  }
-  return res.status(401).json({ success: false, message: 'Usuário ou senha incorretos' });
-});
+// Auth is handled client-side via Supabase Auth (src/lib/supabaseClient.ts).
 
 // Get ERP Data
 app.get('/api/data', async (req, res) => {

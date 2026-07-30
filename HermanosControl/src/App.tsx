@@ -31,8 +31,9 @@ import { SystemResetModal } from './components/common/SystemResetModal';
 import { StepByStepGuideModal } from './components/common/StepByStepGuideModal';
 
 export default function App() {
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => apiService.getCurrentUser() !== null);
-  const [user, setUser] = useState<User | null>(() => apiService.getCurrentUser());
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [user, setUser] = useState<User | null>(null);
+  const [authChecked, setAuthChecked] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<NavigationTab>('dashboard');
   const [data, setData] = useState<AppData>(initialAppData);
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
@@ -40,8 +41,18 @@ export default function App() {
   const [isResetModalOpen, setIsResetModalOpen] = useState<boolean>(false);
   const [isGuideModalOpen, setIsGuideModalOpen] = useState<boolean>(false);
 
-  // Load initial backend data
+  // Check Supabase session on load
   useEffect(() => {
+    apiService.getCurrentUser().then((u) => {
+      setUser(u);
+      setIsAuthenticated(u !== null);
+      setAuthChecked(true);
+    });
+  }, []);
+
+  // Load backend data once authenticated
+  useEffect(() => {
+    if (!isAuthenticated) return;
     const loadData = async () => {
       setIsSyncing(true);
       const backendData = await apiService.getInitialData();
@@ -51,7 +62,7 @@ export default function App() {
       setIsSyncing(false);
     };
     loadData();
-  }, []);
+  }, [isAuthenticated]);
 
   const handleLogin = async (u: string, p: string) => {
     const res = await apiService.login(u, p);
@@ -62,8 +73,8 @@ export default function App() {
     return res;
   };
 
-  const handleLogout = () => {
-    apiService.logout();
+  const handleLogout = async () => {
+    await apiService.logout();
     setUser(null);
     setIsAuthenticated(false);
   };
@@ -425,6 +436,10 @@ export default function App() {
   const lowStockCount = data.products.filter((p) => p.stock < p.initialStock / 2).length;
   const trashCount = data.trash.length;
   const pendingTasksCount = data.tasks.filter((t) => !t.completed).length;
+
+  if (!authChecked) {
+    return null;
+  }
 
   if (!isAuthenticated) {
     return <LoginView onLogin={handleLogin} />;
