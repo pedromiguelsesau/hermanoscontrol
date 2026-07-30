@@ -108,9 +108,9 @@ async function loadData() {
 async function replaceTable(table: string, items: any[], columns: string[]) {
   const ids = items.map((it) => it.id).filter(Boolean);
   if (ids.length > 0) {
-    await pool.query(`DELETE FROM ${table} WHERE id != ALL($1::uuid[])`, [ids]);
+    await pool.query(`DELETE FROM "${table}" WHERE id != ALL($1::uuid[])`, [ids]);
   } else {
-    await pool.query(`DELETE FROM ${table}`);
+    await pool.query(`DELETE FROM "${table}"`);
   }
   for (const item of items) {
     const cols = columns.filter((c) => c in item || c === 'id');
@@ -120,9 +120,10 @@ async function replaceTable(table: string, items: any[], columns: string[]) {
       return v === undefined ? null : v;
     });
     const placeholders = dbCols.map((_, i) => `$${i + 1}`);
-    const updates = dbCols.filter((c) => c !== 'id').map((c) => `${c} = EXCLUDED.${c}`);
+    const quotedCols = dbCols.map((c) => `"${c}"`);
+    const updates = dbCols.filter((c) => c !== 'id').map((c) => `"${c}" = EXCLUDED."${c}"`);
     await pool.query(
-      `INSERT INTO ${table} (${dbCols.join(',')}) VALUES (${placeholders.join(',')})
+      `INSERT INTO "${table}" (${quotedCols.join(',')}) VALUES (${placeholders.join(',')})
        ON CONFLICT (id) DO UPDATE SET ${updates.join(',')}`,
       values
     );
