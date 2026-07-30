@@ -1,7 +1,12 @@
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
-import { Pool } from 'pg';
+import { Pool, types } from 'pg';
+
+// pg returns NUMERIC columns as strings by default (to avoid float precision
+// loss) — but the frontend calls .toFixed()/math ops expecting real numbers.
+// OID 1700 = numeric/decimal.
+types.setTypeParser(1700, (val: string) => parseFloat(val));
 import { GoogleGenAI } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
 import { initialAppData } from './src/data/initialData.js';
