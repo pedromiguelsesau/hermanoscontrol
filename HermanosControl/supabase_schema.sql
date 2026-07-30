@@ -30,7 +30,7 @@ create table if not exists site_config (
 
 -- ---------- Core entities ----------
 create table if not exists products (
-  id uuid primary key default gen_random_uuid(),
+  id text primary key,
   code text, name text, category text, brand text, color text, size text,
   description text, photos text[] default '{}',
   cost_price numeric default 0, sell_price numeric default 0, margin numeric default 0,
@@ -40,22 +40,22 @@ create table if not exists products (
 );
 
 create table if not exists stock_movements (
-  id uuid primary key default gen_random_uuid(),
-  product_id uuid references products(id) on delete set null,
+  id text primary key,
+  product_id text references products(id) on delete set null,
   product_code text, product_name text, color text, size text,
   type text check (type in ('ENTRADA','SAIDA','AJUSTE')),
   quantity int, date timestamptz default now(), reason text, "user" text
 );
 
 create table if not exists customers (
-  id uuid primary key default gen_random_uuid(),
+  id text primary key,
   name text, phone text, email text, notes text,
   total_spent numeric default 0, purchase_count int default 0,
   created_at timestamptz default now(), last_purchase_date timestamptz
 );
 
 create table if not exists purchases (
-  id uuid primary key default gen_random_uuid(),
+  id text primary key,
   supplier text, date timestamptz default now(), payment_method text, notes text,
   freight numeric default 0, total_amount numeric default 0,
   items jsonb not null default '[]'::jsonb, -- PurchaseItem[]
@@ -63,8 +63,8 @@ create table if not exists purchases (
 );
 
 create table if not exists sales (
-  id uuid primary key default gen_random_uuid(),
-  customer_id uuid references customers(id) on delete set null,
+  id text primary key,
+  customer_id text references customers(id) on delete set null,
   customer_name text, date timestamptz default now(),
   items jsonb not null default '[]'::jsonb, -- SaleItem[]
   discount numeric default 0, freight numeric default 0,
@@ -74,21 +74,21 @@ create table if not exists sales (
 );
 
 create table if not exists expenses (
-  id uuid primary key default gen_random_uuid(),
+  id text primary key,
   category text, description text, amount numeric default 0,
   date timestamptz default now(), payment_method text, receipt_url text, notes text,
   created_at timestamptz default now()
 );
 
 create table if not exists cash_flow (
-  id uuid primary key default gen_random_uuid(),
+  id text primary key,
   date timestamptz default now(), type text check (type in ('ENTRADA','SAIDA')),
   category text, description text, amount numeric default 0,
   balance_after numeric default 0, payment_method text, reference_id text
 );
 
 create table if not exists marketing_campaigns (
-  id uuid primary key default gen_random_uuid(),
+  id text primary key,
   title text, budget numeric default 0, spent numeric default 0,
   start_date timestamptz, end_date timestamptz, channel text,
   discount_code text, discount_percentage numeric,
@@ -97,38 +97,38 @@ create table if not exists marketing_campaigns (
 );
 
 create table if not exists goals (
-  id uuid primary key default gen_random_uuid(),
+  id text primary key,
   month_year text, target_revenue numeric default 0, target_profit numeric default 0,
   target_sales_count int default 0, target_items_count int default 0
 );
 
 create table if not exists calendar_events (
-  id uuid primary key default gen_random_uuid(),
+  id text primary key,
   title text, date timestamptz, time text, type text, category text,
   notes text, description text, completed boolean default false
 );
 
 create table if not exists tasks (
-  id uuid primary key default gen_random_uuid(),
+  id text primary key,
   title text, assignee text, priority text, completed boolean default false,
   status text, due_date timestamptz, notes text, created_at timestamptz default now()
 );
 
 create table if not exists audit_logs (
-  id uuid primary key default gen_random_uuid(),
+  id text primary key,
   timestamp timestamptz default now(), date_formatted text,
   "user" text, module text, entity text, entity_id text,
   action text, details text, old_value text, new_value text
 );
 
 create table if not exists trash (
-  id uuid primary key default gen_random_uuid(),
+  id text primary key,
   original_id text, type text, original_name text, payload jsonb,
   deleted_at timestamptz default now(), expires_at timestamptz, description text
 );
 
 create table if not exists media_library (
-  id uuid primary key default gen_random_uuid(),
+  id text primary key,
   name text, url text, category text, size int, size_formatted text,
   mime_type text, uploaded_at timestamptz default now(), uploaded_by text,
   width int, height int

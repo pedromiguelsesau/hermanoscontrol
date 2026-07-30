@@ -113,7 +113,7 @@ const JSONB_FIELDS = new Set(['items', 'history', 'payload']);
 async function replaceTable(table: string, items: any[], columns: string[]) {
   const ids = items.map((it) => it.id).filter(Boolean);
   if (ids.length > 0) {
-    await pool.query(`DELETE FROM "${table}" WHERE id != ALL($1::uuid[])`, [ids]);
+    await pool.query(`DELETE FROM "${table}" WHERE id != ALL($1::text[])`, [ids]);
   } else {
     await pool.query(`DELETE FROM "${table}"`);
   }
