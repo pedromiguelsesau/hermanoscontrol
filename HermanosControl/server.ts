@@ -233,6 +233,58 @@ async function saveData(data: any) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Reconciliação de estoque para edição/exclusão de Compras e Vendas
+// ---------------------------------------------------------------------------
+// Uma Compra ADICIONA unidades ao estoque do produto (direction = +1).
+// Uma Venda REMOVE unidades do estoque do produto (direction = -1).
+//
+// Cada item de `items` (jsonb) é assumido no formato:
+//   { productId: string, quantity: number, ... }
+// Se o seu formato de item usa outro nome de campo para a quantidade
+// (ex: "qty" ou "amount"), ajuste `item.quantity` abaixo.
+async function applyItemsStockDelta(items: any[], direction: 1 | -1) {
+  if (!Array.isArray(items) || items.length === 0) return;
+  for (const item of items) {
+    const productId = item.productId;
+    const quantity = Number(item.quantity) || 0;
+    if (!productId || !quantity) continue;
+    const delta = direction * quantity;
+    await pool.query(
+      `UPDATE products SET stock = COALESCE(stock, 0) + $1, updated_at = NOW() WHERE id = $2`,
+      [delta, productId]
+    );
+  }
+}
+
+// Insere um registro simples de auditoria para manter rastreabilidade de
+// qualquer edição/exclusão manual feita nos módulos financeiros.
+async function logAudit(entity: string, entityId: string, action: string, user: string, details: string, oldValue: any, newValue: any) {
+  try {
+    const now = Date.now();
+    await pool.query(
+      `INSERT INTO audit_logs (id, timestamp, date_formatted, "user", module, entity, entity_id, action, details, old_value, new_value)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      [
+        `audit_${now}_${Math.random().toString(36).substring(2, 7)}`,
+        now,
+        new Date(now).toLocaleString('pt-BR'),
+        user || 'sistema',
+        'financeiro',
+        entity,
+        entityId,
+        action,
+        details,
+        oldValue !== undefined ? JSON.stringify(oldValue) : null,
+        newValue !== undefined ? JSON.stringify(newValue) : null
+      ]
+    );
+  } catch (err) {
+    // Auditoria nunca deve derrubar a operação principal.
+    console.warn('[audit] Falha ao registrar log:', err);
+  }
+}
+
 // Lazy Gemini AI Client initialization
 function getGenAI() {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -276,6 +328,212 @@ app.post('/api/data', async (req, res) => {
     return res.json({ success: true, timestamp: new Date().toISOString() });
   }
   return res.status(500).json({ error: 'Erro ao salvar dados' });
+});
+
+// ---------------------------------------------------------------------------
+// COMPRAS — edição e exclusão individual (com reconciliação de estoque)
+// ---------------------------------------------------------------------------
+
+// Retorna uma compra específica
+app.get('/api/purchases/:id', async (req, res) => {
+  const erpData = await loadData();
+  const purchase = (erpData.purchases || []).find((p: any) => p.id === req.params.id);
+  if (!purchase) return res.status(404).json({ error: 'Compra não encontrada' });
+  return res.json(purchase);
+});
+
+// Edita uma compra (ex: corrigir quantidade lançada errada).
+// Reverte o efeito no estoque dos itens antigos e aplica o efeito dos itens novos.
+app.put('/api/purchases/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updates = req.body || {};
+    const erpData = await loadData();
+    const purchases = erpData.purchases || [];
+    const index = purchases.findIndex((p: any) => p.id === id);
+    if (index === -1) return res.status(404).json({ error: 'Compra não encontrada' });
+
+    const oldPurchase = purchases[index];
+    const newPurchase = { ...oldPurchase, ...updates, id };
+
+    // Só mexe no estoque se os itens realmente mudaram (evita reprocessar
+    // à toa quando o usuário só altera fornecedor/nota/observações).
+    if (updates.items) {
+      await applyItemsStockDelta(oldPurchase.items || [], -1); // desfaz efeito antigo
+      await applyItemsStockDelta(newPurchase.items || [], 1); // aplica efeito novo
+    }
+
+    purchases[index] = newPurchase;
+    erpData.purchases = purchases;
+    const success = await saveData(erpData);
+    if (!success) return res.status(500).json({ error: 'Erro ao salvar compra' });
+
+    await logAudit('purchase', id, 'update', updates.user, 'Compra editada manualmente', oldPurchase, newPurchase);
+
+    const refreshed = await loadData();
+    return res.json({ success: true, purchase: refreshed.purchases.find((p: any) => p.id === id) });
+  } catch (err: any) {
+    console.error('Error updating purchase:', err);
+    return res.status(500).json({ error: 'Erro ao atualizar compra' });
+  }
+});
+
+// Exclui uma compra e desfaz o estoque que ela havia adicionado.
+app.delete('/api/purchases/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const erpData = await loadData();
+    const purchases = erpData.purchases || [];
+    const index = purchases.findIndex((p: any) => p.id === id);
+    if (index === -1) return res.status(404).json({ error: 'Compra não encontrada' });
+
+    const purchase = purchases[index];
+    await applyItemsStockDelta(purchase.items || [], -1); // remove o que essa compra tinha somado ao estoque
+
+    purchases.splice(index, 1);
+    erpData.purchases = purchases;
+    const success = await saveData(erpData);
+    if (!success) return res.status(500).json({ error: 'Erro ao excluir compra' });
+
+    await logAudit('purchase', id, 'delete', req.body?.user, 'Compra excluída manualmente', purchase, null);
+
+    return res.json({ success: true, message: 'Compra excluída e estoque ajustado' });
+  } catch (err: any) {
+    console.error('Error deleting purchase:', err);
+    return res.status(500).json({ error: 'Erro ao excluir compra' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// VENDAS — edição e exclusão individual (com reconciliação de estoque)
+// ---------------------------------------------------------------------------
+
+app.get('/api/sales/:id', async (req, res) => {
+  const erpData = await loadData();
+  const sale = (erpData.sales || []).find((s: any) => s.id === req.params.id);
+  if (!sale) return res.status(404).json({ error: 'Venda não encontrada' });
+  return res.json(sale);
+});
+
+// Edita uma venda. Uma venda subtrai do estoque, então para editar:
+// devolve o estoque dos itens antigos e depois subtrai os itens novos.
+app.put('/api/sales/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updates = req.body || {};
+    const erpData = await loadData();
+    const sales = erpData.sales || [];
+    const index = sales.findIndex((s: any) => s.id === id);
+    if (index === -1) return res.status(404).json({ error: 'Venda não encontrada' });
+
+    const oldSale = sales[index];
+    const newSale = { ...oldSale, ...updates, id };
+
+    if (updates.items) {
+      await applyItemsStockDelta(oldSale.items || [], 1); // devolve estoque da venda antiga
+      await applyItemsStockDelta(newSale.items || [], -1); // desconta estoque da venda nova
+    }
+
+    sales[index] = newSale;
+    erpData.sales = sales;
+    const success = await saveData(erpData);
+    if (!success) return res.status(500).json({ error: 'Erro ao salvar venda' });
+
+    await logAudit('sale', id, 'update', updates.user, 'Venda editada manualmente', oldSale, newSale);
+
+    const refreshed = await loadData();
+    return res.json({ success: true, sale: refreshed.sales.find((s: any) => s.id === id) });
+  } catch (err: any) {
+    console.error('Error updating sale:', err);
+    return res.status(500).json({ error: 'Erro ao atualizar venda' });
+  }
+});
+
+// Exclui uma venda e devolve ao estoque as unidades que ela havia vendido.
+app.delete('/api/sales/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const erpData = await loadData();
+    const sales = erpData.sales || [];
+    const index = sales.findIndex((s: any) => s.id === id);
+    if (index === -1) return res.status(404).json({ error: 'Venda não encontrada' });
+
+    const sale = sales[index];
+    await applyItemsStockDelta(sale.items || [], 1); // devolve ao estoque o que essa venda havia tirado
+
+    sales.splice(index, 1);
+    erpData.sales = sales;
+    const success = await saveData(erpData);
+    if (!success) return res.status(500).json({ error: 'Erro ao excluir venda' });
+
+    await logAudit('sale', id, 'delete', req.body?.user, 'Venda excluída manualmente', sale, null);
+
+    return res.json({ success: true, message: 'Venda excluída e estoque ajustado' });
+  } catch (err: any) {
+    console.error('Error deleting sale:', err);
+    return res.status(500).json({ error: 'Erro ao excluir venda' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// DESPESAS — edição e exclusão individual
+// ---------------------------------------------------------------------------
+// Despesas não afetam estoque, então a edição é uma atualização direta.
+
+app.get('/api/expenses/:id', async (req, res) => {
+  const erpData = await loadData();
+  const expense = (erpData.expenses || []).find((e: any) => e.id === req.params.id);
+  if (!expense) return res.status(404).json({ error: 'Despesa não encontrada' });
+  return res.json(expense);
+});
+
+app.put('/api/expenses/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updates = req.body || {};
+    const erpData = await loadData();
+    const expenses = erpData.expenses || [];
+    const index = expenses.findIndex((e: any) => e.id === id);
+    if (index === -1) return res.status(404).json({ error: 'Despesa não encontrada' });
+
+    const oldExpense = expenses[index];
+    const newExpense = { ...oldExpense, ...updates, id };
+
+    expenses[index] = newExpense;
+    erpData.expenses = expenses;
+    const success = await saveData(erpData);
+    if (!success) return res.status(500).json({ error: 'Erro ao salvar despesa' });
+
+    await logAudit('expense', id, 'update', updates.user, 'Despesa editada manualmente', oldExpense, newExpense);
+
+    return res.json({ success: true, expense: newExpense });
+  } catch (err: any) {
+    console.error('Error updating expense:', err);
+    return res.status(500).json({ error: 'Erro ao atualizar despesa' });
+  }
+});
+
+app.delete('/api/expenses/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const erpData = await loadData();
+    const expenses = erpData.expenses || [];
+    const index = expenses.findIndex((e: any) => e.id === id);
+    if (index === -1) return res.status(404).json({ error: 'Despesa não encontrada' });
+
+    const expense = expenses[index];
+    expenses.splice(index, 1);
+    erpData.expenses = expenses;
+    const success = await saveData(erpData);
+    if (!success) return res.status(500).json({ error: 'Erro ao excluir despesa' });
+
+    await logAudit('expense', id, 'delete', req.body?.user, 'Despesa excluída manualmente', expense, null);
+
+    return res.json({ success: true, message: 'Despesa excluída com sucesso' });
+  } catch (err: any) {
+    console.error('Error deleting expense:', err);
+    return res.status(500).json({ error: 'Erro ao excluir despesa' });
+  }
 });
 
 // Image Upload Endpoint (sends the file to Supabase Storage and records it in mediaLibrary)
