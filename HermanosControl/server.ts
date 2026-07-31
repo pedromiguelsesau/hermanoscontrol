@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
@@ -8,6 +9,7 @@ import { Pool, types } from 'pg';
 // OID 1700 = numeric/decimal.
 types.setTypeParser(1700, (val: string) => parseFloat(val));
 import { GoogleGenAI } from '@google/genai';
+import { createClient } from '@supabase/supabase-js';
 import { createServer as createViteServer } from 'vite';
 import { initialAppData } from './src/data/initialData.js';
 
@@ -22,8 +24,9 @@ const PORT = 3000;
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Uploads still go to local disk (ephemeral on Render — survives only until the
-// next deploy/restart). Consider moving this to Supabase Storage later.
+// Uploads go to Supabase Storage (see storage section below). The local
+// data/uploads dir is only kept to keep serving images uploaded before the
+// migration — nothing new is ever written there.
 const DB_DIR = path.join(process.cwd(), 'data');
 const UPLOADS_DIR = path.join(DB_DIR, 'uploads');
 
@@ -31,8 +34,54 @@ if (!fs.existsSync(UPLOADS_DIR)) {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 }
 
-// Serve uploaded media statically
+// Serve legacy uploaded media statically
 app.use('/uploads', express.static(UPLOADS_DIR));
+
+// --- Supabase Storage (media bucket) ---
+// Uses the secret/service key, so it bypasses Storage RLS: only this trusted
+// server writes to the bucket, the browser just reads the public URLs.
+const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '';
+const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY || '';
+const MEDIA_BUCKET = process.env.SUPABASE_MEDIA_BUCKET || 'media';
+
+const storage =
+  SUPABASE_URL && SUPABASE_SECRET_KEY
+    ? createClient(SUPABASE_URL, SUPABASE_SECRET_KEY, {
+        auth: { persistSession: false, autoRefreshToken: false }
+      }).storage
+    : null;
+
+// Creates the public bucket on first boot if it isn't there yet, so a fresh
+// Supabase project works without any manual dashboard step.
+async function ensureMediaBucket() {
+  if (!storage) {
+    console.warn(
+      '[storage] SUPABASE_URL/SUPABASE_SECRET_KEY ausentes — upload de imagens desabilitado.'
+    );
+    return;
+  }
+  const { data, error } = await storage.getBucket(MEDIA_BUCKET);
+  if (data && !error) return;
+
+  const { error: createErr } = await storage.createBucket(MEDIA_BUCKET, {
+    public: true,
+    fileSizeLimit: 10 * 1024 * 1024,
+    allowedMimeTypes: ['image/jpeg', 'image/png', 'image/webp', 'image/svg+xml', 'image/gif']
+  });
+  if (createErr && !/already exists/i.test(createErr.message)) {
+    console.error('[storage] Falha ao criar bucket', MEDIA_BUCKET, createErr.message);
+  } else {
+    console.log('[storage] Bucket público criado:', MEDIA_BUCKET);
+  }
+}
+
+// Extracts the in-bucket object path back out of a public Storage URL, so
+// deleting a media item also removes the actual file.
+function storagePathFromUrl(url: string): string | null {
+  const marker = `/storage/v1/object/public/${MEDIA_BUCKET}/`;
+  const idx = url.indexOf(marker);
+  return idx === -1 ? null : decodeURIComponent(url.slice(idx + marker.length));
+}
 
 // --- Supabase Postgres connection ---
 // DATABASE_URL must be set in Render's Environment tab (Supabase pooler
@@ -229,12 +278,17 @@ app.post('/api/data', async (req, res) => {
   return res.status(500).json({ error: 'Erro ao salvar dados' });
 });
 
-// Image Upload Endpoint (Saves to disk in data/uploads and updates mediaLibrary in DB)
+// Image Upload Endpoint (sends the file to Supabase Storage and records it in mediaLibrary)
 app.post('/api/upload', async (req, res) => {
   try {
     const { fileData, fileName, category, user } = req.body;
     if (!fileData) {
       return res.status(400).json({ error: 'Nenhum arquivo enviado' });
+    }
+    if (!storage) {
+      return res.status(503).json({
+        error: 'Armazenamento de imagens não configurado (SUPABASE_URL / SUPABASE_SECRET_KEY).'
+      });
     }
 
     let buffer: Buffer;
@@ -263,12 +317,20 @@ app.post('/api/upload', async (req, res) => {
       return res.status(400).json({ error: 'Tamanho máximo permitido é 10MB' });
     }
 
-    const cleanOriginalName = (fileName || 'imagem').replace(/[^a-zA-Z0-9._-]/g, '_');
+    const cleanOriginalName = (fileName || `imagem.${fileExt}`).replace(/[^a-zA-Z0-9._-]/g, '_');
     const uniqueId = `med_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     const savedFileName = `${uniqueId}_${cleanOriginalName}`;
-    const filePath = path.join(UPLOADS_DIR, savedFileName);
+    // Category becomes a folder inside the bucket (Produtos/, Banners/, Logos/...)
+    const objectPath = `${(category || 'Outros').replace(/[^a-zA-Z0-9._-]/g, '_')}/${savedFileName}`;
 
-    fs.writeFileSync(filePath, buffer);
+    const { error: uploadErr } = await storage
+      .from(MEDIA_BUCKET)
+      .upload(objectPath, buffer, { contentType: mimeType, upsert: false });
+
+    if (uploadErr) {
+      console.error('Error uploading to Supabase Storage:', uploadErr);
+      return res.status(500).json({ error: `Erro ao enviar imagem: ${uploadErr.message}` });
+    }
 
     const sizeInBytes = buffer.length;
     let sizeFormatted = `${(sizeInBytes / 1024).toFixed(0)} KB`;
@@ -276,7 +338,7 @@ app.post('/api/upload', async (req, res) => {
       sizeFormatted = `${(sizeInBytes / (1024 * 1024)).toFixed(2)} MB`;
     }
 
-    const fileUrl = `/uploads/${savedFileName}`;
+    const fileUrl = storage.from(MEDIA_BUCKET).getPublicUrl(objectPath).data.publicUrl;
 
     const mediaItem = {
       id: uniqueId,
@@ -331,7 +393,15 @@ app.delete('/api/media/:id', async (req, res) => {
     }
 
     const item = erpData.mediaLibrary[itemIndex];
-    if (item.url && item.url.startsWith('/uploads/')) {
+    const objectPath = item.url ? storagePathFromUrl(item.url) : null;
+
+    if (objectPath && storage) {
+      const { error: removeErr } = await storage.from(MEDIA_BUCKET).remove([objectPath]);
+      if (removeErr) {
+        console.warn('Could not delete file from Supabase Storage:', removeErr.message);
+      }
+    } else if (item.url && item.url.startsWith('/uploads/')) {
+      // Legacy image still on local disk
       const fileName = item.url.replace('/uploads/', '');
       const diskPath = path.join(UPLOADS_DIR, fileName);
       if (fs.existsSync(diskPath)) {
@@ -480,14 +550,20 @@ app.post('/api/ai/chat', async (req, res) => {
       });
     }
 
+    let totalSales = 0;
+    for (const s of erpData.sales || []) totalSales += s.totalAmount || 0;
+
+    let totalExpenses = 0;
+    for (const e of erpData.expenses || []) totalExpenses += e.amount || 0;
+
     const systemInstruction = `Você é a IA Oficial de Gestão da Hermano's Outfit, integrada ao Hermano's Control ERP.
 Seu tom é profissional, direto, elegante e estratégico.
 Você tem acesso aos seguintes dados em tempo real da empresa:
 - Total de produtos cadastrados: ${erpData.products?.length || 0}
 - Produtos com estoque baixo (<50% do inicial): ${erpData.products?.filter((p: any) => p.stock < (p.initialStock / 2)).map((p: any) => p.name).join(', ') || 'Nenhum'}
 - Total de vendas registradas: ${erpData.sales?.length || 0}
-- Total faturado em vendas: R$ ${erpData.sales?.reduce((acc: number, s: any) => acc + (s.totalAmount || 0), 0).toFixed(2)}
-- Despesas totais: R$ ${erpData.expenses?.reduce((acc: number, e: any) => acc + (e.amount || 0), 0).toFixed(2)}
+- Total faturado em vendas: R$ ${totalSales.toFixed(2)}
+- Despesas totais: R$ ${totalExpenses.toFixed(2)}
 
 Responda às perguntas dos sócios/gestores com precisão, oferecendo números, conselhos de marketing no Instagram, precificação, giro de estoque e sugestões para acelerar as vendas.`;
 
@@ -508,6 +584,8 @@ Responda às perguntas dos sócios/gestores com precisão, oferecendo números, 
 
 // Vite Middleware for Development / Static server for Production
 async function startServer() {
+  await ensureMediaBucket();
+
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
