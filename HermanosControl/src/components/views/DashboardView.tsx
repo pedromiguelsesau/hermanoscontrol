@@ -76,33 +76,51 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   const avgTicketMonth = salesMonth.length > 0 ? revenueMonth / salesMonth.length : 0;
 
-  // Vendas x Despesas — todo o histórico, mês a mês, para comparar entrada e saída.
+  // Vendas x saídas, todo o histórico, mês a mês.
+  // Compras de lote não geram registro em `expenses` — elas só entram no fluxo
+  // de caixa —, então precisam ser somadas à parte, senão o maior custo da
+  // operação (o estoque comprado) ficaria de fora da comparação.
   const revenueTotal = data.sales.reduce((acc, s) => acc + s.totalAmount, 0);
+  const purchasesTotal = data.purchases.reduce((acc, p) => acc + p.totalAmount, 0);
   const expensesTotal = data.expenses.reduce((acc, e) => acc + e.amount, 0);
-  const balanceTotal = revenueTotal - expensesTotal;
+  const outflowTotal = purchasesTotal + expensesTotal;
+  const balanceTotal = revenueTotal - outflowTotal;
+
+  type ComparisonRow = { mes: string; vendas: number; compras: number; despesas: number };
 
   const monthlyComparison = (() => {
-    const buckets: Record<string, { mes: string; vendas: number; despesas: number }> = {};
+    const buckets: Record<string, ComparisonRow> = {};
     const label = (iso: string) => {
       const [y, m] = iso.split('-');
       return `${m}/${y.slice(2)}`;
     };
+    const bucketFor = (iso: string) => {
+      const key = iso.substring(0, 7);
+      if (!key) return null;
+      buckets[key] = buckets[key] || { mes: label(iso), vendas: 0, compras: 0, despesas: 0 };
+      return buckets[key];
+    };
+
     data.sales.forEach((s) => {
-      const key = s.date.substring(0, 7);
-      if (!key) return;
-      buckets[key] = buckets[key] || { mes: label(s.date), vendas: 0, despesas: 0 };
-      buckets[key].vendas += s.totalAmount;
+      const b = bucketFor(s.date);
+      if (b) b.vendas += s.totalAmount;
+    });
+    data.purchases.forEach((p) => {
+      const b = bucketFor(p.date);
+      if (b) b.compras += p.totalAmount;
     });
     data.expenses.forEach((e) => {
-      const key = e.date.substring(0, 7);
-      if (!key) return;
-      buckets[key] = buckets[key] || { mes: label(e.date), vendas: 0, despesas: 0 };
-      buckets[key].despesas += e.amount;
+      const b = bucketFor(e.date);
+      if (b) b.despesas += e.amount;
     });
+
     return Object.keys(buckets)
       .sort()
       .slice(-12)
-      .map((k) => ({ ...buckets[k], saldo: buckets[k].vendas - buckets[k].despesas }));
+      .map((k) => ({
+        ...buckets[k],
+        saldo: buckets[k].vendas - buckets[k].compras - buckets[k].despesas
+      }));
   })();
 
   const brl = (n: number) => `R$ ${n.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`;
@@ -192,37 +210,49 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   return (
     <div className="space-y-6 pb-12">
-      {/* Vendas x Despesas */}
+      {/* Comprei x Vendi */}
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="rounded-2xl border border-rose-500/25 bg-[#121215] p-4 shadow-xl">
+          <p className="text-xs font-semibold text-zinc-300">Comprei em Estoque</p>
+          <p className="mt-2 text-2xl font-black text-rose-400">{brl(purchasesTotal)}</p>
+          <p className="mt-1 text-[10px] text-zinc-500">{data.purchases.length} lote(s) lançado(s)</p>
+        </div>
+        <div className="rounded-2xl border border-emerald-500/25 bg-[#121215] p-4 shadow-xl">
+          <p className="text-xs font-semibold text-zinc-300">Vendi</p>
+          <p className="mt-2 text-2xl font-black text-emerald-400">{brl(revenueTotal)}</p>
+          <p className="mt-1 text-[10px] text-zinc-500">{data.sales.length} venda(s) registrada(s)</p>
+        </div>
+        <div className="rounded-2xl border border-zinc-800 bg-[#121215] p-4 shadow-xl">
+          <p className="text-xs font-semibold text-zinc-300">Outras Despesas</p>
+          <p className="mt-2 text-2xl font-black text-zinc-200">{brl(expensesTotal)}</p>
+          <p className="mt-1 text-[10px] text-zinc-500">Fora as compras de estoque</p>
+        </div>
+        <div
+          className={`rounded-2xl border p-4 shadow-xl ${
+            balanceTotal >= 0 ? 'border-amber-500/40 bg-amber-500/5' : 'border-rose-500/50 bg-rose-500/10'
+          }`}
+        >
+          <p className="text-xs font-semibold text-zinc-300">Saldo (Vendi − Saídas)</p>
+          <p className={`mt-2 text-2xl font-black ${balanceTotal >= 0 ? 'text-amber-400' : 'text-rose-300'}`}>
+            {brl(balanceTotal)}
+          </p>
+          <p className="mt-1 text-[10px] text-zinc-500">Saídas: {brl(outflowTotal)}</p>
+        </div>
+      </div>
+
+      {/* Vendas x Compras x Despesas */}
       <div className="rounded-2xl border border-zinc-800 bg-[#121215] p-5 shadow-xl">
-        <div className="mb-4 flex flex-col justify-between gap-2 sm:flex-row sm:items-center">
-          <div>
-            <h3 className="text-base font-bold text-white">Vendas x Despesas</h3>
-            <p className="text-[11px] text-zinc-400">
-              Tudo o que entrou em vendas comparado com tudo o que saiu em despesas.
-            </p>
-          </div>
-          <div className="flex items-center gap-2 text-xs">
-            <span className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-1.5 font-bold text-emerald-400">
-              Vendas: {brl(revenueTotal)}
-            </span>
-            <span className="rounded-lg border border-rose-500/20 bg-rose-500/10 px-3 py-1.5 font-bold text-rose-400">
-              Despesas: {brl(expensesTotal)}
-            </span>
-            <span
-              className={`rounded-lg border px-3 py-1.5 font-bold ${
-                balanceTotal >= 0
-                  ? 'border-amber-500/30 bg-amber-500/10 text-amber-400'
-                  : 'border-rose-500/40 bg-rose-500/20 text-rose-300'
-              }`}
-            >
-              Saldo: {brl(balanceTotal)}
-            </span>
-          </div>
+        <div className="mb-4">
+          <h3 className="text-base font-bold text-white">Vendas x Compras x Despesas</h3>
+          <p className="text-[11px] text-zinc-400">
+            Mês a mês: o que entrou em vendas contra o que saiu em compra de estoque e demais
+            despesas.
+          </p>
         </div>
 
         {monthlyComparison.length === 0 ? (
           <p className="py-8 text-center text-xs text-zinc-500">
-            Nenhuma venda ou despesa lançada ainda. Assim que você registrar a primeira, a
+            Nenhuma venda, compra ou despesa lançada ainda. Assim que você registrar a primeira, a
             comparação aparece aqui.
           </p>
         ) : (
@@ -250,7 +280,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                     cursor={{ fill: '#ffffff08' }}
                   />
                   <Bar dataKey="vendas" name="Vendas" fill="#34d399" radius={[4, 4, 0, 0]} />
-                  <Bar dataKey="despesas" name="Despesas" fill="#fb7185" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="compras" name="Compra de Estoque" fill="#fb7185" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="despesas" name="Outras Despesas" fill="#a1a1aa" radius={[4, 4, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -261,7 +292,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   <tr>
                     <th className="py-2 pr-3">Mês</th>
                     <th className="py-2 px-3 text-right">Vendas</th>
-                    <th className="py-2 px-3 text-right">Despesas</th>
+                    <th className="py-2 px-3 text-right">Compra de Estoque</th>
+                    <th className="py-2 px-3 text-right">Outras Despesas</th>
                     <th className="py-2 pl-3 text-right">Saldo</th>
                   </tr>
                 </thead>
@@ -270,7 +302,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                     <tr key={row.mes}>
                       <td className="py-2 pr-3 font-semibold text-white">{row.mes}</td>
                       <td className="py-2 px-3 text-right text-emerald-400">{brl(row.vendas)}</td>
-                      <td className="py-2 px-3 text-right text-rose-400">{brl(row.despesas)}</td>
+                      <td className="py-2 px-3 text-right text-rose-400">{brl(row.compras)}</td>
+                      <td className="py-2 px-3 text-right text-zinc-300">{brl(row.despesas)}</td>
                       <td
                         className={`py-2 pl-3 text-right font-bold ${
                           row.saldo >= 0 ? 'text-amber-400' : 'text-rose-300'
