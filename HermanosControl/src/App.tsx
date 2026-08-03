@@ -96,6 +96,37 @@ export default function App() {
     user: 'Hermano Admin'
   });
 
+  // Every cash flow entry carries a running balance, so editing or removing one
+  // invalidates the balance of every entry after it. Rebuilding the whole chain
+  // from the oldest entry is simpler and safer than patching it in place.
+  // The list is stored newest-first, hence the backwards walk.
+  const OPENING_BALANCE = 5000;
+  const recalcCashFlow = (entries: AppData['cashFlow']) => {
+    const out = [...entries];
+    let balance = OPENING_BALANCE;
+    for (let i = out.length - 1; i >= 0; i--) {
+      balance += out[i].type === 'ENTRADA' ? out[i].amount : -out[i].amount;
+      out[i] = { ...out[i], balanceAfter: balance };
+    }
+    return out;
+  };
+
+  // Sales, purchases and expenses each own one cash flow entry, linked by
+  // referenceId. Editing the source record rewrites that entry; deleting it
+  // drops the entry, so the balance never keeps a value with nothing behind it.
+  const replaceCashEntry = (
+    entries: AppData['cashFlow'],
+    referenceId: string,
+    replacement: AppData['cashFlow'][number] | null
+  ) => {
+    const without = entries.filter((c) => c.referenceId !== referenceId);
+    if (!replacement) return recalcCashFlow(without);
+    const at = entries.findIndex((c) => c.referenceId === referenceId);
+    const next = [...without];
+    next.splice(at === -1 ? 0 : at, 0, replacement);
+    return recalcCashFlow(next);
+  };
+
   // System Reset Handlers
   const handleResetProducts = () => {
     const log = createAuditLog('PRODUTOS', 'RESET_PRODUTOS', 'Catálogo de produtos e estoque zerados pelo usuário.');
@@ -297,7 +328,8 @@ export default function App() {
       category: 'Compra de Estoque / Lote',
       description: `Compra Lote ${purchase.id} - Fornecedor: ${purchase.supplier}`,
       amount: purchase.totalAmount,
-      balanceAfter: newBalance
+      balanceAfter: newBalance,
+      referenceId: purchase.id
     };
 
     const log = createAuditLog('COMPRAS', 'NOVA_COMPRA', `Lançamento de lote ${purchase.id} no valor de R$ ${purchase.totalAmount.toFixed(2)}.`);
@@ -343,7 +375,8 @@ export default function App() {
       category: 'Venda de Produtos',
       description: `Venda ${sale.id} - Cliente: ${sale.customerName}`,
       amount: sale.totalAmount,
-      balanceAfter: newBalance
+      balanceAfter: newBalance,
+      referenceId: sale.id
     };
 
     const log = createAuditLog('VENDAS', 'NOVA_VENDA', `Venda ${sale.id} no valor de R$ ${sale.totalAmount.toFixed(2)} realizada por ${sale.salesperson}.`);
@@ -370,7 +403,8 @@ export default function App() {
       category: `Despesa: ${expense.category}`,
       description: expense.description,
       amount: expense.amount,
-      balanceAfter: newBalance
+      balanceAfter: newBalance,
+      referenceId: expense.id
     };
 
     const log = createAuditLog('DESPESAS', 'NOVA_DESPESA', `Despesa ${expense.description} de R$ ${expense.amount.toFixed(2)} lançada.`);
@@ -379,6 +413,35 @@ export default function App() {
       ...data,
       expenses: [expense, ...data.expenses],
       cashFlow: [cashEntry, ...data.cashFlow],
+      auditLogs: [log, ...data.auditLogs]
+    });
+  };
+
+  const handleEditExpense = (expense: Expense) => {
+    const old = data.expenses.find((e) => e.id === expense.id);
+    if (!old) return;
+
+    const cashEntry = {
+      id: `cf-${expense.id}`,
+      date: expense.date,
+      type: 'SAIDA' as const,
+      category: `Despesa: ${expense.category}`,
+      description: expense.description,
+      amount: expense.amount,
+      balanceAfter: 0, // recalculated by replaceCashEntry
+      referenceId: expense.id
+    };
+
+    const log = createAuditLog(
+      'DESPESAS',
+      'ALTERAÇÃO_DESPESA',
+      `Despesa ${expense.description} alterada de R$ ${old.amount.toFixed(2)} para R$ ${expense.amount.toFixed(2)}.`
+    );
+
+    updateAndSaveData({
+      ...data,
+      expenses: data.expenses.map((e) => (e.id === expense.id ? expense : e)),
+      cashFlow: replaceCashEntry(data.cashFlow, expense.id, cashEntry),
       auditLogs: [log, ...data.auditLogs]
     });
   };
@@ -401,7 +464,226 @@ export default function App() {
     updateAndSaveData({
       ...data,
       expenses: data.expenses.filter((e) => e.id !== expenseId),
+      // The matching cash flow entry has to go too, otherwise the balance keeps
+      // subtracting an expense that no longer exists.
+      cashFlow: replaceCashEntry(data.cashFlow, expenseId, null),
       trash: [trashItem, ...data.trash],
+      auditLogs: [log, ...data.auditLogs]
+    });
+  };
+
+  // --- Sale edit / delete ---
+  // Both work the same way: undo the stock and customer effects the original
+  // sale caused, then apply the new ones (or none, when deleting).
+  const applySaleEffects = (
+    products: Product[],
+    customers: Customer[],
+    sale: Sale,
+    direction: 1 | -1
+  ) => {
+    const nextProducts = products.map((p) => ({ ...p }));
+    sale.items.forEach((item) => {
+      const prod = nextProducts.find((p) => p.id === item.productId);
+      // direction -1 = sale applied (stock leaves), +1 = sale undone (stock returns)
+      if (prod) prod.stock = Math.max(0, prod.stock + direction * item.quantity);
+    });
+
+    const nextCustomers = customers.map((c) => ({ ...c }));
+    if (sale.customerId) {
+      const cli = nextCustomers.find((c) => c.id === sale.customerId);
+      if (cli) {
+        cli.purchaseCount = Math.max(0, cli.purchaseCount - direction);
+        cli.totalSpent = Math.max(0, cli.totalSpent - direction * sale.totalAmount);
+      }
+    }
+    return { nextProducts, nextCustomers };
+  };
+
+  const handleEditSale = (sale: Sale) => {
+    const old = data.sales.find((s) => s.id === sale.id);
+    if (!old) return;
+
+    const undone = applySaleEffects(data.products, data.customers, old, 1);
+    const redone = applySaleEffects(undone.nextProducts, undone.nextCustomers, sale, -1);
+
+    const cashEntry = {
+      id: `cf-${sale.id}`,
+      date: sale.date,
+      type: 'ENTRADA' as const,
+      category: 'Venda de Produtos',
+      description: `Venda ${sale.id} - Cliente: ${sale.customerName}`,
+      amount: sale.totalAmount,
+      balanceAfter: 0,
+      referenceId: sale.id
+    };
+
+    const log = createAuditLog(
+      'VENDAS',
+      'ALTERAÇÃO_VENDA',
+      `Venda ${sale.id} alterada de R$ ${old.totalAmount.toFixed(2)} para R$ ${sale.totalAmount.toFixed(2)}. Estoque e cliente reajustados.`
+    );
+
+    updateAndSaveData({
+      ...data,
+      sales: data.sales.map((s) => (s.id === sale.id ? sale : s)),
+      products: redone.nextProducts,
+      customers: redone.nextCustomers,
+      cashFlow: replaceCashEntry(data.cashFlow, sale.id, cashEntry),
+      auditLogs: [log, ...data.auditLogs]
+    });
+  };
+
+  const handleDeleteSale = (saleId: string) => {
+    const sale = data.sales.find((s) => s.id === saleId);
+    if (!sale) return;
+
+    const { nextProducts, nextCustomers } = applySaleEffects(data.products, data.customers, sale, 1);
+
+    const trashItem: TrashItem = {
+      id: `trash-${Date.now()}`,
+      type: 'VENDA',
+      originalId: sale.id,
+      originalName: `Venda ${sale.id} - ${sale.customerName}`,
+      payload: sale,
+      deletedAtFormatted: new Date().toLocaleDateString('pt-BR')
+    };
+
+    const log = createAuditLog('VENDAS', 'EXCLUSÃO_VENDA', `Venda ${sale.id} de R$ ${sale.totalAmount.toFixed(2)} movida para lixeira. Estoque devolvido.`);
+
+    updateAndSaveData({
+      ...data,
+      sales: data.sales.filter((s) => s.id !== saleId),
+      products: nextProducts,
+      customers: nextCustomers,
+      cashFlow: replaceCashEntry(data.cashFlow, saleId, null),
+      trash: [trashItem, ...data.trash],
+      auditLogs: [log, ...data.auditLogs]
+    });
+  };
+
+  // --- Purchase (lote) edit / delete ---
+  // A purchase only ever adds stock to products matched by name/color/size, so
+  // undoing one subtracts the same quantities back out.
+  const applyPurchaseStock = (products: Product[], purchase: Purchase, direction: 1 | -1) => {
+    const next = products.map((p) => ({ ...p }));
+    purchase.items.forEach((item) => {
+      const prod = next.find(
+        (p) =>
+          p.name.toLowerCase() === item.productName.toLowerCase() &&
+          p.color.toLowerCase() === item.color.toLowerCase() &&
+          p.size.toLowerCase() === item.size.toLowerCase()
+      );
+      if (prod) prod.stock = Math.max(0, prod.stock + direction * item.quantity);
+    });
+    return next;
+  };
+
+  const handleEditPurchase = (purchase: Purchase) => {
+    const old = data.purchases.find((p) => p.id === purchase.id);
+    if (!old) return;
+
+    const undone = applyPurchaseStock(data.products, old, -1);
+    const redone = applyPurchaseStock(undone, purchase, 1);
+
+    const cashEntry = {
+      id: `cf-${purchase.id}`,
+      date: purchase.date,
+      type: 'SAIDA' as const,
+      category: 'Compra de Estoque / Lote',
+      description: `Compra Lote ${purchase.id} - Fornecedor: ${purchase.supplier}`,
+      amount: purchase.totalAmount,
+      balanceAfter: 0,
+      referenceId: purchase.id
+    };
+
+    const log = createAuditLog(
+      'COMPRAS',
+      'ALTERAÇÃO_COMPRA',
+      `Lote ${purchase.id} alterado de R$ ${old.totalAmount.toFixed(2)} para R$ ${purchase.totalAmount.toFixed(2)}. Estoque reajustado.`
+    );
+
+    updateAndSaveData({
+      ...data,
+      purchases: data.purchases.map((p) => (p.id === purchase.id ? purchase : p)),
+      products: redone,
+      cashFlow: replaceCashEntry(data.cashFlow, purchase.id, cashEntry),
+      auditLogs: [log, ...data.auditLogs]
+    });
+  };
+
+  const handleDeletePurchase = (purchaseId: string) => {
+    const purchase = data.purchases.find((p) => p.id === purchaseId);
+    if (!purchase) return;
+
+    const trashItem: TrashItem = {
+      id: `trash-${Date.now()}`,
+      type: 'COMPRA',
+      originalId: purchase.id,
+      originalName: `Lote ${purchase.id} - ${purchase.supplier}`,
+      payload: purchase,
+      deletedAtFormatted: new Date().toLocaleDateString('pt-BR')
+    };
+
+    const log = createAuditLog('COMPRAS', 'EXCLUSÃO_COMPRA', `Lote ${purchase.id} de R$ ${purchase.totalAmount.toFixed(2)} movido para lixeira. Estoque estornado.`);
+
+    updateAndSaveData({
+      ...data,
+      purchases: data.purchases.filter((p) => p.id !== purchaseId),
+      products: applyPurchaseStock(data.products, purchase, -1),
+      cashFlow: replaceCashEntry(data.cashFlow, purchaseId, null),
+      trash: [trashItem, ...data.trash],
+      auditLogs: [log, ...data.auditLogs]
+    });
+  };
+
+  // --- Stock movement edit / delete ---
+  // ENTRADA and SAIDA carry a reversible delta. AJUSTE sets the stock to an
+  // absolute number and the movement never recorded what it was before, so its
+  // quantity cannot be undone — the views only let the reason be edited there.
+  const movementDelta = (m: { type: string; quantity: number }) =>
+    m.type === 'ENTRADA' ? m.quantity : m.type === 'SAIDA' ? -m.quantity : 0;
+
+  const handleEditStockMovement = (movement: AppData['stockMovements'][number]) => {
+    const old = data.stockMovements.find((m) => m.id === movement.id);
+    if (!old) return;
+
+    const delta = movementDelta(movement) - movementDelta(old);
+    const updatedProducts = data.products.map((p) =>
+      p.id === movement.productId
+        ? { ...p, stock: Math.max(0, p.stock + delta), updatedAt: new Date().toISOString() }
+        : p
+    );
+
+    const log = createAuditLog(
+      'ESTOQUE',
+      'ALTERAÇÃO_MOVIMENTO',
+      `Movimento ${movement.id} do produto ${movement.productName} alterado (${old.type} ${old.quantity} → ${movement.type} ${movement.quantity}).`
+    );
+
+    updateAndSaveData({
+      ...data,
+      products: updatedProducts,
+      stockMovements: data.stockMovements.map((m) => (m.id === movement.id ? movement : m)),
+      auditLogs: [log, ...data.auditLogs]
+    });
+  };
+
+  const handleDeleteStockMovement = (movementId: string) => {
+    const mv = data.stockMovements.find((m) => m.id === movementId);
+    if (!mv) return;
+
+    const updatedProducts = data.products.map((p) =>
+      p.id === mv.productId
+        ? { ...p, stock: Math.max(0, p.stock - movementDelta(mv)), updatedAt: new Date().toISOString() }
+        : p
+    );
+
+    const log = createAuditLog('ESTOQUE', 'EXCLUSÃO_MOVIMENTO', `Movimento ${mv.type} de ${mv.quantity} un do produto ${mv.productName} excluído. Estoque estornado.`);
+
+    updateAndSaveData({
+      ...data,
+      products: updatedProducts,
+      stockMovements: data.stockMovements.filter((m) => m.id !== movementId),
       auditLogs: [log, ...data.auditLogs]
     });
   };
@@ -506,6 +788,8 @@ export default function App() {
                 products={data.products}
                 movements={data.stockMovements}
                 onAdjustStock={handleAdjustStock}
+                onEditMovement={handleEditStockMovement}
+                onDeleteMovement={handleDeleteStockMovement}
               />
             )}
             {activeTab === 'purchases' && (
@@ -513,6 +797,8 @@ export default function App() {
                 purchases={data.purchases}
                 products={data.products}
                 onAddPurchase={handleAddPurchase}
+                onEditPurchase={handleEditPurchase}
+                onDeletePurchase={handleDeletePurchase}
               />
             )}
             {activeTab === 'sales' && (
@@ -521,6 +807,8 @@ export default function App() {
                 products={data.products}
                 customers={data.customers}
                 onAddSale={handleAddSale}
+                onEditSale={handleEditSale}
+                onDeleteSale={handleDeleteSale}
                 onOpenGuideModal={() => setIsGuideModalOpen(true)}
               />
             )}
@@ -546,6 +834,7 @@ export default function App() {
               <ExpensesView
                 expenses={data.expenses}
                 onAddExpense={handleAddExpense}
+                onEditExpense={handleEditExpense}
                 onDeleteExpense={handleDeleteExpense}
                 onOpenGuideModal={() => setIsGuideModalOpen(true)}
               />

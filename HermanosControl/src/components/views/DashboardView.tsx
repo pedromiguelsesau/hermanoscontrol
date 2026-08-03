@@ -76,6 +76,37 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   const avgTicketMonth = salesMonth.length > 0 ? revenueMonth / salesMonth.length : 0;
 
+  // Vendas x Despesas — todo o histórico, mês a mês, para comparar entrada e saída.
+  const revenueTotal = data.sales.reduce((acc, s) => acc + s.totalAmount, 0);
+  const expensesTotal = data.expenses.reduce((acc, e) => acc + e.amount, 0);
+  const balanceTotal = revenueTotal - expensesTotal;
+
+  const monthlyComparison = (() => {
+    const buckets: Record<string, { mes: string; vendas: number; despesas: number }> = {};
+    const label = (iso: string) => {
+      const [y, m] = iso.split('-');
+      return `${m}/${y.slice(2)}`;
+    };
+    data.sales.forEach((s) => {
+      const key = s.date.substring(0, 7);
+      if (!key) return;
+      buckets[key] = buckets[key] || { mes: label(s.date), vendas: 0, despesas: 0 };
+      buckets[key].vendas += s.totalAmount;
+    });
+    data.expenses.forEach((e) => {
+      const key = e.date.substring(0, 7);
+      if (!key) return;
+      buckets[key] = buckets[key] || { mes: label(e.date), vendas: 0, despesas: 0 };
+      buckets[key].despesas += e.amount;
+    });
+    return Object.keys(buckets)
+      .sort()
+      .slice(-12)
+      .map((k) => ({ ...buckets[k], saldo: buckets[k].vendas - buckets[k].despesas }));
+  })();
+
+  const brl = (n: number) => `R$ ${n.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`;
+
   // Stock Low Alerts (< 50% initial)
   const lowStockProducts = data.products.filter((p) => p.stock < p.initialStock / 2);
   const lowStockCount = lowStockProducts.length;
@@ -161,6 +192,101 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   return (
     <div className="space-y-6 pb-12">
+      {/* Vendas x Despesas */}
+      <div className="rounded-2xl border border-zinc-800 bg-[#121215] p-5 shadow-xl">
+        <div className="mb-4 flex flex-col justify-between gap-2 sm:flex-row sm:items-center">
+          <div>
+            <h3 className="text-base font-bold text-white">Vendas x Despesas</h3>
+            <p className="text-[11px] text-zinc-400">
+              Tudo o que entrou em vendas comparado com tudo o que saiu em despesas.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 text-xs">
+            <span className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-1.5 font-bold text-emerald-400">
+              Vendas: {brl(revenueTotal)}
+            </span>
+            <span className="rounded-lg border border-rose-500/20 bg-rose-500/10 px-3 py-1.5 font-bold text-rose-400">
+              Despesas: {brl(expensesTotal)}
+            </span>
+            <span
+              className={`rounded-lg border px-3 py-1.5 font-bold ${
+                balanceTotal >= 0
+                  ? 'border-amber-500/30 bg-amber-500/10 text-amber-400'
+                  : 'border-rose-500/40 bg-rose-500/20 text-rose-300'
+              }`}
+            >
+              Saldo: {brl(balanceTotal)}
+            </span>
+          </div>
+        </div>
+
+        {monthlyComparison.length === 0 ? (
+          <p className="py-8 text-center text-xs text-zinc-500">
+            Nenhuma venda ou despesa lançada ainda. Assim que você registrar a primeira, a
+            comparação aparece aqui.
+          </p>
+        ) : (
+          <>
+            <div className="h-64 w-full">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={monthlyComparison}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+                  <XAxis dataKey="mes" stroke="#71717a" fontSize={11} tickLine={false} />
+                  <YAxis
+                    stroke="#71717a"
+                    fontSize={11}
+                    tickLine={false}
+                    axisLine={false}
+                    tickFormatter={(v) => `R$ ${(v / 1000).toFixed(0)}k`}
+                  />
+                  <Tooltip
+                    formatter={(v: number, name: string) => [brl(v), name]}
+                    contentStyle={{
+                      backgroundColor: '#18181b',
+                      border: '1px solid #3f3f46',
+                      borderRadius: '0.75rem',
+                      fontSize: '12px'
+                    }}
+                    cursor={{ fill: '#ffffff08' }}
+                  />
+                  <Bar dataKey="vendas" name="Vendas" fill="#34d399" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="despesas" name="Despesas" fill="#fb7185" radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+
+            <div className="mt-4 overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="border-b border-zinc-800 text-[11px] uppercase tracking-wider text-zinc-400">
+                  <tr>
+                    <th className="py-2 pr-3">Mês</th>
+                    <th className="py-2 px-3 text-right">Vendas</th>
+                    <th className="py-2 px-3 text-right">Despesas</th>
+                    <th className="py-2 pl-3 text-right">Saldo</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-800/60">
+                  {monthlyComparison.map((row) => (
+                    <tr key={row.mes}>
+                      <td className="py-2 pr-3 font-semibold text-white">{row.mes}</td>
+                      <td className="py-2 px-3 text-right text-emerald-400">{brl(row.vendas)}</td>
+                      <td className="py-2 px-3 text-right text-rose-400">{brl(row.despesas)}</td>
+                      <td
+                        className={`py-2 pl-3 text-right font-bold ${
+                          row.saldo >= 0 ? 'text-amber-400' : 'text-rose-300'
+                        }`}
+                      >
+                        {brl(row.saldo)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </div>
+
       {/* Onboarding Start Fresh Banner */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4 px-6 text-xs text-amber-200 shadow-lg">
         <div className="flex items-center gap-3">

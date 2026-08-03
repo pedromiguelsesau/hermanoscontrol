@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ShoppingCart, Plus, Trash2, Search, CheckCircle2, User, X } from 'lucide-react';
+import { ShoppingCart, Plus, Trash2, Search, CheckCircle2, User, X, Edit3 } from 'lucide-react';
 import { Sale, SaleItem, Product, Customer } from '../../types';
 import { EmptyStateGuideCard } from '../common/EmptyStateGuideCard';
 
@@ -8,6 +8,8 @@ interface SalesViewProps {
   products: Product[];
   customers: Customer[];
   onAddSale: (sale: Sale) => void;
+  onEditSale: (sale: Sale) => void;
+  onDeleteSale: (saleId: string) => void;
   onOpenGuideModal?: () => void;
 }
 
@@ -16,9 +18,12 @@ export const SalesView: React.FC<SalesViewProps> = ({
   products,
   customers,
   onAddSale,
+  onEditSale,
+  onDeleteSale,
   onOpenGuideModal
 }) => {
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [editingSale, setEditingSale] = useState<Sale | null>(null);
 
   // Form state
   const [customerName, setCustomerName] = useState('');
@@ -89,8 +94,10 @@ export const SalesView: React.FC<SalesViewProps> = ({
     e.preventDefault();
     if (!customerName || cart.length === 0) return;
 
-    const newSale: Sale = {
-      id: `VD-${new Date().getFullYear()}-${String(sales.length + 1).padStart(3, '0')}`,
+    const saleObj: Sale = {
+      id: editingSale
+        ? editingSale.id
+        : `VD-${new Date().getFullYear()}-${String(sales.length + 1).padStart(3, '0')}`,
       customerId: selectedCustomerId || undefined,
       customerName,
       date,
@@ -102,16 +109,33 @@ export const SalesView: React.FC<SalesViewProps> = ({
       paymentMethod,
       salesperson,
       notes,
-      createdAt: new Date().toISOString()
+      createdAt: editingSale ? editingSale.createdAt : new Date().toISOString()
     };
 
-    onAddSale(newSale);
+    if (editingSale) onEditSale(saleObj);
+    else onAddSale(saleObj);
+
     setIsModalOpen(false);
+    setEditingSale(null);
     // Reset
     setCart([]);
     setCustomerName('');
     setDiscount(0);
     setFreight(0);
+  };
+
+  const openEditSale = (s: Sale) => {
+    setEditingSale(s);
+    setCustomerName(s.customerName);
+    setSelectedCustomerId(s.customerId || '');
+    setDate(s.date);
+    setPaymentMethod(s.paymentMethod);
+    setSalesperson(s.salesperson);
+    setDiscount(s.discount);
+    setFreight(s.freight);
+    setNotes(s.notes || '');
+    setCart(s.items);
+    setIsModalOpen(true);
   };
 
   return (
@@ -125,7 +149,7 @@ export const SalesView: React.FC<SalesViewProps> = ({
           </p>
         </div>
         <button
-          onClick={() => setIsModalOpen(true)}
+          onClick={() => { setEditingSale(null); setIsModalOpen(true); }}
           className="flex items-center justify-center gap-2 rounded-xl bg-amber-500 px-4 py-2.5 text-xs font-bold text-black shadow-lg shadow-amber-500/20 transition-all hover:bg-amber-400 active:scale-95"
         >
           <Plus className="h-4 w-4" />
@@ -141,7 +165,7 @@ export const SalesView: React.FC<SalesViewProps> = ({
           exampleTitle="🛒 Exemplo de Registro de Venda"
           exampleContent={`• Cliente: Gabriel Santos (ou Cliente Balcão)\n• Item: 1x Camiseta Oversized Streetwear Preta (R$ 89,90)\n• Forma de Pagamento: Pix | Vendedor: Hermano\n• O caixa atualiza na hora e imprime o comprovante!`}
           actionText="Registrar Minha Primeira Venda"
-          onAction={() => setIsModalOpen(true)}
+          onAction={() => { setEditingSale(null); setIsModalOpen(true); }}
           onOpenGuide={onOpenGuideModal}
         />
       ) : (
@@ -166,11 +190,30 @@ export const SalesView: React.FC<SalesViewProps> = ({
                   <p className="text-[11px] text-zinc-400">Vendedor: {s.salesperson}</p>
                 </div>
 
-                <div className="text-right">
-                  <p className="text-xs text-zinc-400">{s.date}</p>
-                  <p className="text-lg font-black text-emerald-400">
-                    R$ {s.totalAmount.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
-                  </p>
+                <div className="flex items-center gap-3">
+                  <div className="text-right">
+                    <p className="text-xs text-zinc-400">{s.date}</p>
+                    <p className="text-lg font-black text-emerald-400">
+                      R$ {s.totalAmount.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => openEditSale(s)}
+                      title="Editar Venda"
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-[11px] font-semibold text-zinc-300 hover:text-white"
+                    >
+                      <Edit3 className="h-3.5 w-3.5 text-amber-400" />
+                      <span>Editar</span>
+                    </button>
+                    <button
+                      onClick={() => onDeleteSale(s.id)}
+                      title="Excluir venda e devolver o estoque"
+                      className="rounded-lg border border-zinc-800 bg-zinc-900 p-2 text-rose-400 hover:bg-rose-500/10"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -207,7 +250,7 @@ export const SalesView: React.FC<SalesViewProps> = ({
           <div className="w-full max-w-3xl rounded-2xl border border-zinc-800 bg-[#121215] p-6 shadow-2xl max-h-[90vh] overflow-y-auto">
             <div className="mb-6 flex items-center justify-between border-b border-zinc-800 pb-4">
               <div>
-                <h3 className="text-base font-bold text-white">Registrar Nova Venda</h3>
+                <h3 className="text-base font-bold text-white">{editingSale ? `Editar Venda (${editingSale.id})` : 'Registrar Nova Venda'}</h3>
                 <p className="text-xs text-zinc-400">Selecione o cliente, adicione os produtos e forma de pagamento.</p>
               </div>
               <button onClick={() => setIsModalOpen(false)} className="text-zinc-400 hover:text-white">

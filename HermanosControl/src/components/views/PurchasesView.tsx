@@ -1,19 +1,24 @@
 import React, { useState } from 'react';
-import { ShoppingBag, Plus, Trash2, Calendar, FileText, CheckCircle2, DollarSign, X } from 'lucide-react';
+import { ShoppingBag, Plus, Trash2, Calendar, FileText, CheckCircle2, DollarSign, X, Edit3 } from 'lucide-react';
 import { Purchase, PurchaseItem, Product } from '../../types';
 
 interface PurchasesViewProps {
   purchases: Purchase[];
   products: Product[];
   onAddPurchase: (purchase: Purchase) => void;
+  onEditPurchase: (purchase: Purchase) => void;
+  onDeletePurchase: (purchaseId: string) => void;
 }
 
 export const PurchasesView: React.FC<PurchasesViewProps> = ({
   purchases,
   products,
-  onAddPurchase
+  onAddPurchase,
+  onEditPurchase,
+  onDeletePurchase
 }) => {
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [editingPurchase, setEditingPurchase] = useState<Purchase | null>(null);
 
   // Form State
   const [supplier, setSupplier] = useState('');
@@ -72,8 +77,10 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
     e.preventDefault();
     if (!supplier || items.length === 0) return;
 
-    const newPurchase: Purchase = {
-      id: `CMP-${new Date().getFullYear()}-${String(purchases.length + 1).padStart(3, '0')}`,
+    const purchaseObj: Purchase = {
+      id: editingPurchase
+        ? editingPurchase.id
+        : `CMP-${new Date().getFullYear()}-${String(purchases.length + 1).padStart(3, '0')}`,
       supplier,
       date,
       paymentMethod,
@@ -82,15 +89,30 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
       totalAmount: totalPurchaseAmount,
       items,
       receiptUrl: receiptUrl.trim() || undefined,
-      createdAt: new Date().toISOString()
+      createdAt: editingPurchase ? editingPurchase.createdAt : new Date().toISOString()
     };
 
-    onAddPurchase(newPurchase);
+    if (editingPurchase) onEditPurchase(purchaseObj);
+    else onAddPurchase(purchaseObj);
+
     setIsModalOpen(false);
+    setEditingPurchase(null);
     // Reset
     setSupplier('');
     setNotes('');
     setFreight(0);
+  };
+
+  const openEditPurchase = (cmp: Purchase) => {
+    setEditingPurchase(cmp);
+    setSupplier(cmp.supplier);
+    setDate(cmp.date);
+    setPaymentMethod(cmp.paymentMethod);
+    setFreight(cmp.freight);
+    setNotes(cmp.notes || '');
+    setReceiptUrl(cmp.receiptUrl || '');
+    setItems(cmp.items);
+    setIsModalOpen(true);
   };
 
   return (
@@ -104,7 +126,7 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
           </p>
         </div>
         <button
-          onClick={() => setIsModalOpen(true)}
+          onClick={() => { setEditingPurchase(null); setIsModalOpen(true); }}
           className="flex items-center justify-center gap-2 rounded-xl bg-amber-500 px-4 py-2.5 text-xs font-bold text-black shadow-lg shadow-amber-500/20 transition-all hover:bg-amber-400 active:scale-95"
         >
           <Plus className="h-4 w-4" />
@@ -163,6 +185,25 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
             {cmp.notes && (
               <p className="mt-3 text-[11px] text-zinc-400 italic">Observações: {cmp.notes}</p>
             )}
+
+            <div className="mt-4 flex items-center justify-end gap-2 border-t border-zinc-800/80 pt-3">
+              <button
+                onClick={() => openEditPurchase(cmp)}
+                title="Editar Lote"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-[11px] font-semibold text-zinc-300 hover:text-white"
+              >
+                <Edit3 className="h-3.5 w-3.5 text-amber-400" />
+                <span>Editar</span>
+              </button>
+              <button
+                onClick={() => onDeletePurchase(cmp.id)}
+                title="Excluir lote e estornar o estoque"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-[11px] font-semibold text-rose-400 hover:bg-rose-500/10"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                <span>Excluir</span>
+              </button>
+            </div>
           </div>
         ))}
       </div>
@@ -173,7 +214,7 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
           <div className="w-full max-w-3xl rounded-2xl border border-zinc-800 bg-[#121215] p-6 shadow-2xl max-h-[90vh] overflow-y-auto">
             <div className="mb-6 flex items-center justify-between border-b border-zinc-800 pb-4">
               <div>
-                <h3 className="text-base font-bold text-white">Lançar Nova Compra de Lote</h3>
+                <h3 className="text-base font-bold text-white">{editingPurchase ? `Editar Lote (${editingPurchase.id})` : 'Lançar Nova Compra de Lote'}</h3>
                 <p className="text-xs text-zinc-400">Insira fornecedor, frete e adicione os produtos do lote.</p>
               </div>
               <button onClick={() => setIsModalOpen(false)} className="text-zinc-400 hover:text-white">

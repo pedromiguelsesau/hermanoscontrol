@@ -9,7 +9,9 @@ import {
   Minus,
   Search,
   CheckCircle2,
-  X
+  X,
+  Edit3,
+  Trash2
 } from 'lucide-react';
 import { Product, StockMovement } from '../../types';
 
@@ -22,12 +24,16 @@ interface StockViewProps {
     quantity: number,
     reason: string
   ) => void;
+  onEditMovement: (movement: StockMovement) => void;
+  onDeleteMovement: (movementId: string) => void;
 }
 
 export const StockView: React.FC<StockViewProps> = ({
   products,
   movements,
-  onAdjustStock
+  onAdjustStock,
+  onEditMovement,
+  onDeleteMovement
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [showLowStockOnly, setShowLowStockOnly] = useState(false);
@@ -36,6 +42,31 @@ export const StockView: React.FC<StockViewProps> = ({
   const [adjustType, setAdjustType] = useState<'ENTRADA' | 'SAIDA' | 'AJUSTE'>('ENTRADA');
   const [adjustQuantity, setAdjustQuantity] = useState<number>(5);
   const [adjustReason, setAdjustReason] = useState('Ajuste de inventário físico');
+
+  // Movement editing. An AJUSTE set the stock to an absolute value and never
+  // recorded what it was before, so its quantity can't be safely undone —
+  // only the reason stays editable for those.
+  const [editingMovement, setEditingMovement] = useState<StockMovement | null>(null);
+  const [editQuantity, setEditQuantity] = useState<number>(0);
+  const [editReason, setEditReason] = useState('');
+  const isAdjustment = editingMovement?.type === 'AJUSTE';
+
+  const openMovementEditor = (mv: StockMovement) => {
+    setEditingMovement(mv);
+    setEditQuantity(mv.quantity);
+    setEditReason(mv.reason);
+  };
+
+  const submitMovementEdit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingMovement) return;
+    onEditMovement({
+      ...editingMovement,
+      quantity: isAdjustment ? editingMovement.quantity : Number(editQuantity),
+      reason: editReason.trim() || editingMovement.reason
+    });
+    setEditingMovement(null);
+  };
 
   const lowStockCount = products.filter((p) => p.stock < p.initialStock / 2).length;
 
@@ -202,14 +233,103 @@ export const StockView: React.FC<StockViewProps> = ({
                   </p>
                 </div>
               </div>
-              <div className="text-right text-[10px] text-zinc-500">
-                <p>{mv.date}</p>
-                <p>Por: {mv.user}</p>
+              <div className="flex items-center gap-3">
+                <div className="text-right text-[10px] text-zinc-500">
+                  <p>{mv.date}</p>
+                  <p>Por: {mv.user}</p>
+                </div>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => openMovementEditor(mv)}
+                    title="Editar Movimentação"
+                    className="inline-flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1 text-[10px] font-semibold text-zinc-300 hover:text-white"
+                  >
+                    <Edit3 className="h-3 w-3 text-amber-400" />
+                    <span>Editar</span>
+                  </button>
+                  <button
+                    onClick={() => onDeleteMovement(mv.id)}
+                    title="Excluir e estornar o estoque"
+                    className="rounded-lg border border-zinc-800 bg-zinc-900 p-1.5 text-rose-400 hover:bg-rose-500/10"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </button>
+                </div>
               </div>
             </div>
           ))}
         </div>
       </div>
+
+      {/* Movement Edit Modal */}
+      {editingMovement && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl border border-zinc-800 bg-[#121215] p-6 shadow-2xl">
+            <div className="mb-4 flex items-center justify-between border-b border-zinc-800 pb-3">
+              <div>
+                <h3 className="text-sm font-bold text-white">Editar Movimentação</h3>
+                <p className="text-[11px] text-zinc-400">
+                  {editingMovement.productName} — {editingMovement.type}
+                </p>
+              </div>
+              <button onClick={() => setEditingMovement(null)} className="text-zinc-400 hover:text-white">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <form onSubmit={submitMovementEdit} className="space-y-4 text-xs">
+              <div>
+                <label className="mb-1 block font-semibold text-zinc-300">Quantidade</label>
+                <input
+                  type="number"
+                  min={1}
+                  value={isAdjustment ? editingMovement.quantity : editQuantity}
+                  disabled={isAdjustment}
+                  onChange={(e) => setEditQuantity(parseInt(e.target.value) || 0)}
+                  className="w-full rounded-xl border border-zinc-800 bg-zinc-900 p-2.5 text-white focus:border-amber-500 focus:outline-none disabled:opacity-50"
+                />
+                {isAdjustment && (
+                  <p className="mt-1.5 flex items-start gap-1.5 text-[10px] text-amber-400/90">
+                    <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+                    <span>
+                      Ajustes definem o estoque como um valor absoluto e não guardam qual era o
+                      saldo anterior, então a quantidade não pode ser desfeita com segurança. Para
+                      corrigir, lance um novo ajuste com o valor certo.
+                    </span>
+                  </p>
+                )}
+              </div>
+
+              <div>
+                <label className="mb-1 block font-semibold text-zinc-300">Motivo</label>
+                <input
+                  type="text"
+                  value={editReason}
+                  onChange={(e) => setEditReason(e.target.value)}
+                  placeholder="Ex: Chegada de lote, troca ou inventário"
+                  className="w-full rounded-xl border border-zinc-800 bg-zinc-900 p-2.5 text-white focus:border-amber-500 focus:outline-none"
+                />
+              </div>
+
+              <div className="flex justify-end gap-3 border-t border-zinc-800 pt-4">
+                <button
+                  type="button"
+                  onClick={() => setEditingMovement(null)}
+                  className="rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-2 font-bold text-zinc-400 hover:text-white"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  className="rounded-xl bg-amber-500 px-6 py-2 font-bold text-black hover:bg-amber-400"
+                >
+                  Salvar
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Adjust Modal */}
       {isModalOpen && selectedProduct && (

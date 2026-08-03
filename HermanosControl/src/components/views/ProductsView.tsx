@@ -311,9 +311,9 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
                 <button
                   onClick={() => handleOpenEditModal(p)}
                   title="Editar Produto"
-                  className="rounded-lg border border-zinc-800 bg-zinc-900 p-2 text-zinc-300 hover:text-white"
+                  className="inline-flex items-center rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-zinc-300 hover:text-white"
                 >
-                  <Edit3 className="h-3.5 w-3.5" />
+                  <Edit3 className="h-3.5 w-3.5 text-amber-400" /><span className="ml-1 text-[11px] font-medium">Editar</span>
                 </button>
                 <button
                   onClick={() => onDeleteProduct(p.id)}

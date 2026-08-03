@@ -1,11 +1,12 @@
 import React, { useState } from 'react';
-import { Receipt, Plus, Upload, Trash2, FileText, Search, ExternalLink, X } from 'lucide-react';
+import { Receipt, Plus, Upload, Trash2, FileText, Search, ExternalLink, X, Edit3 } from 'lucide-react';
 import { Expense, ExpenseCategory } from '../../types';
 import { EmptyStateGuideCard } from '../common/EmptyStateGuideCard';
 
 interface ExpensesViewProps {
   expenses: Expense[];
   onAddExpense: (expense: Expense) => void;
+  onEditExpense: (expense: Expense) => void;
   onDeleteExpense: (expenseId: string) => void;
   onOpenGuideModal?: () => void;
 }
@@ -13,12 +14,14 @@ interface ExpensesViewProps {
 export const ExpensesView: React.FC<ExpensesViewProps> = ({
   expenses,
   onAddExpense,
+  onEditExpense,
   onDeleteExpense,
   onOpenGuideModal
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('Todas');
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [editingExpense, setEditingExpense] = useState<Expense | null>(null);
 
   // Form State
   const [category, setCategory] = useState<ExpenseCategory>('Embalagens');
@@ -62,12 +65,36 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
 
   const totalExpenseAmount = filteredExpenses.reduce((sum, e) => sum + e.amount, 0);
 
+  const handleOpenAddModal = () => {
+    setEditingExpense(null);
+    setCategory('Embalagens');
+    setDescription('');
+    setAmount(100);
+    setDate(new Date().toISOString().split('T')[0]);
+    setPaymentMethod('PIX');
+    setReceiptUrl('');
+    setNotes('');
+    setIsModalOpen(true);
+  };
+
+  const handleOpenEditModal = (exp: Expense) => {
+    setEditingExpense(exp);
+    setCategory(exp.category);
+    setDescription(exp.description);
+    setAmount(exp.amount);
+    setDate(exp.date);
+    setPaymentMethod(exp.paymentMethod);
+    setReceiptUrl(exp.receiptUrl || '');
+    setNotes(exp.notes || '');
+    setIsModalOpen(true);
+  };
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!description.trim() || amount <= 0) return;
 
-    const newExpense: Expense = {
-      id: `EXP-${Date.now()}`,
+    const expenseObj: Expense = {
+      id: editingExpense ? editingExpense.id : `EXP-${Date.now()}`,
       category,
       description: description.trim(),
       amount: Number(amount),
@@ -75,11 +102,14 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
       paymentMethod,
       receiptUrl: receiptUrl.trim() || undefined,
       notes: notes.trim() || undefined,
-      createdAt: new Date().toISOString()
+      createdAt: editingExpense ? editingExpense.createdAt : new Date().toISOString()
     };
 
-    onAddExpense(newExpense);
+    if (editingExpense) onEditExpense(expenseObj);
+    else onAddExpense(expenseObj);
+
     setIsModalOpen(false);
+    setEditingExpense(null);
     setDescription('');
     setAmount(100);
     setReceiptUrl('');
@@ -97,7 +127,7 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
           </p>
         </div>
         <button
-          onClick={() => setIsModalOpen(true)}
+          onClick={handleOpenAddModal}
           className="flex items-center justify-center gap-2 rounded-xl bg-amber-500 px-4 py-2.5 text-xs font-bold text-black shadow-lg shadow-amber-500/20 transition-all hover:bg-amber-400 active:scale-95"
         >
           <Plus className="h-4 w-4" />
@@ -151,7 +181,7 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
           exampleTitle="💸 Exemplo de Lançamento de Despesa"
           exampleContent={`• Descrição: 100 Sacolas Personalizadas Hermano’s Outfit\n• Categoria: Embalagens | Valor: R$ 180,00\n• Forma de Pagamento: Pix\n• Anexo de comprovante opcional em foto/PDF!`}
           actionText="Lançar Minha Primeira Despesa"
-          onAction={() => setIsModalOpen(true)}
+          onAction={handleOpenAddModal}
           onOpenGuide={onOpenGuideModal}
         />
       ) : (
@@ -200,13 +230,23 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
                     )}
                   </td>
                   <td className="px-4 py-3 text-right">
-                    <button
-                      onClick={() => onDeleteExpense(exp.id)}
-                      className="rounded p-1 text-rose-400 hover:bg-rose-500/10"
-                      title="Mover para Lixeira"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
+                    <div className="flex items-center justify-end gap-1">
+                      <button
+                        onClick={() => handleOpenEditModal(exp)}
+                        className="inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] font-semibold text-zinc-300 hover:bg-zinc-800 hover:text-white"
+                        title="Editar Despesa"
+                      >
+                        <Edit3 className="h-3.5 w-3.5 text-amber-400" />
+                        <span>Editar</span>
+                      </button>
+                      <button
+                        onClick={() => onDeleteExpense(exp.id)}
+                        className="rounded p-1 text-rose-400 hover:bg-rose-500/10"
+                        title="Mover para Lixeira"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -220,7 +260,7 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
           <div className="w-full max-w-md rounded-2xl border border-zinc-800 bg-[#121215] p-6 shadow-2xl">
             <div className="mb-4 flex items-center justify-between border-b border-zinc-800 pb-3">
-              <h3 className="text-sm font-bold text-white">Nova Despesa Operacional</h3>
+              <h3 className="text-sm font-bold text-white">{editingExpense ? `Editar Despesa (${editingExpense.id})` : 'Nova Despesa Operacional'}</h3>
               <button onClick={() => setIsModalOpen(false)} className="text-zinc-400 hover:text-white">
                 <X className="h-5 w-5" />
               </button>
